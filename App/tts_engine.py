@@ -189,12 +189,31 @@ class ModelTTS:
                 os.environ["MODELSCOPE_CACHE"] = cache_dir
 
             local_path = _resolve_model_path(model_name, model_dir)
-            from funasr import AutoModel
 
-            if local_path:
-                self.model = AutoModel(model_dir=local_path, device=device, trust_remote_code=False)
+            if "CosyVoice3" in model_name or "CosyVoice" in model_name:
+                try:
+                    from cosyvoice.cli.cosyvoice import CosyVoice3 as _CosyVoice3
+                    self.model = _CosyVoice3(
+                        local_path or model_name,
+                        fp16=True if device.startswith("cuda") else False,
+                    )
+                except ImportError:
+                    try:
+                        from cosyvoice.cli.cosyvoice import AutoModel as _CosyAutoModel
+                        self.model = _CosyAutoModel(
+                            local_path or model_name,
+                        )
+                    except ImportError:
+                        print("[ModelTTS] cosyvoice package not installed.")
+                        print("[ModelTTS] Install: pip install cosyvoice")
+                        print("[ModelTTS] Or: git clone https://github.com/FunAudioLLM/CosyVoice && cd CosyVoice && pip install -e .")
+                        return False
             else:
-                self.model = AutoModel(model=model_name, device=device, trust_remote_code=False)
+                from funasr import AutoModel
+                if local_path:
+                    self.model = AutoModel(model_dir=local_path, device=device, trust_remote_code=False)
+                else:
+                    self.model = AutoModel(model=model_name, device=device, trust_remote_code=False)
 
             self._last_model_name = model_name
             self._last_device = device

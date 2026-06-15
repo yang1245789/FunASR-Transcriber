@@ -54,6 +54,9 @@ kaldiio
 
 # TTS
 pyttsx3
+# CosyVoice 3.0 TTS (install from GitHub)
+# Uncomment after installing: pip install cosyvoice
+# cosyvoice
 
 # Audio processing
 ffmpy
