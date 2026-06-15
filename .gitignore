@@ -1,0 +1,62 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Models and data files (downloaded by user)
+models/
+models/hub/
+models/models/
+models/Qwen/
+.App/models/
+
+# Large binary files
+*.exe
+*.zip
+*.7z
+*.rar
+*.tar.gz
+*.bin
+*.safetensors
+*.ckpt-*
+*.pt
+
+# Audio test files
+*.m4a
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.aac
+
+# User configuration (contains personal preferences)
+config.json
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temp files
+*.tmp
+*.temp
+*.lock/
+._*temp*
+funasr_cache/
+
+# OS files
+$RECYCLE.BIN/
+System Volume Information/

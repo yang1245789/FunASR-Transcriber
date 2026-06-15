@@ -1,0 +1,70 @@
+# Core
+funasr
+modelscope
+
+# GUI
+PyQt6
+PyQt6-Qt6
+PyQt6_sip
+
+# Audio recording
+sounddevice
+soundfile
+pydub
+comtypes
+pycaw
+psutil
+
+# Scientific
+numpy
+scipy
+librosa
+
+# NLP / tokenization
+editdistance
+jieba
+sentencepiece
+tiktoken
+tokenizers
+protobuf
+safetensors
+huggingface_hub
+
+# Common
+joblib
+regex
+tqdm
+requests
+certifi
+urllib3
+packaging
+typing_extensions
+filelock
+PyYAML
+omegaconf
+hydra-core
+Jinja2
+MarkupSafe
+colorama
+pillow
+matplotlib
+pandas
+scikit-learn
+kaldiio
+
+# TTS
+pyttsx3
+
+# Audio processing
+ffmpy
+imageio-ffmpeg
+audioread
+lazy-loader
+pooch
+soxr
+decorator
+jaconv
+jamo
+pytorch-wpe
+torch-complex
+tensorboardX
