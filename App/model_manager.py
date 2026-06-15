@@ -3,6 +3,7 @@ import json
 import threading
 import shutil
 import tempfile
+import re
 import importlib
 from pathlib import Path
 from utils import get_config_path, get_default_model_dir
@@ -199,20 +200,45 @@ class ModelManager:
             os.path.join(self.model_dir, model_folder),
         ]
 
-    def _scan_local_models(self):
-        for known_id in AVAILABLE_MODELS:
-            for path in self._get_modelscope_paths(known_id):
-                if not os.path.isdir(path):
+    def _find_model_dir(self, model_id):
+        for path in self._get_modelscope_paths(model_id):
+            if self._is_valid_model_dir(path):
+                return path
+        if "/" in model_id:
+            org_name, model_name = model_id.split("/", 1)
+            model_norm = re.sub(r'[^a-z0-9]', '', model_name.lower())
+            for prefix in [os.path.join(self.model_dir, "hub"), os.path.join(self.model_dir, "models"), self.model_dir]:
+                org_dir = os.path.join(prefix, org_name)
+                if not os.path.isdir(org_dir):
                     continue
-                has_config = os.path.exists(os.path.join(path, "configuration.json")) or os.path.exists(os.path.join(path, "config.json"))
                 try:
-                    names = os.listdir(path)
+                    for entry in os.listdir(org_dir):
+                        entry_full = os.path.join(org_dir, entry)
+                        if not os.path.isdir(entry_full):
+                            continue
+                        if re.sub(r'[^a-z0-9]', '', entry.lower()) == model_norm:
+                            if self._is_valid_model_dir(entry_full):
+                                return entry_full
                 except PermissionError:
                     continue
-                has_model = any(f.endswith(('.pt', '.bin', '.safetensors', '.onnx')) for f in names if os.path.isfile(os.path.join(path, f)))
-                if has_config or has_model:
-                    self._local_models[known_id] = path
-                    break
+        return None
+
+    def _is_valid_model_dir(self, path):
+        if not os.path.isdir(path):
+            return False
+        has_config = os.path.exists(os.path.join(path, "configuration.json")) or os.path.exists(os.path.join(path, "config.json"))
+        try:
+            names = os.listdir(path)
+        except PermissionError:
+            return False
+        has_model = any(f.endswith(('.pt', '.bin', '.safetensors', '.onnx')) for f in names if os.path.isfile(os.path.join(path, f)))
+        return has_config or has_model
+
+    def _scan_local_models(self):
+        for known_id in AVAILABLE_MODELS:
+            path = self._find_model_dir(known_id)
+            if path:
+                self._local_models[known_id] = path
 
     def get_local_models(self):
         return self._local_models
@@ -247,18 +273,10 @@ class ModelManager:
     def is_model_downloaded(self, model_id):
         if model_id in self._local_models:
             return True
-        for path in self._get_modelscope_paths(model_id):
-            if not os.path.isdir(path):
-                continue
-            has_config = os.path.exists(os.path.join(path, "configuration.json")) or os.path.exists(os.path.join(path, "config.json"))
-            try:
-                names = os.listdir(path)
-            except PermissionError:
-                continue
-            has_model = any(f.endswith(('.pt', '.bin', '.safetensors', '.onnx')) for f in names if os.path.isfile(os.path.join(path, f)))
-            if has_config or has_model:
-                self._local_models[model_id] = path
-                return True
+        path = self._find_model_dir(model_id)
+        if path:
+            self._local_models[model_id] = path
+            return True
         return False
 
     def get_downloaded_models(self):
