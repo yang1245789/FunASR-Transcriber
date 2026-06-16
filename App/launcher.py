@@ -1062,7 +1062,7 @@ class LauncherWindow(QMainWindow):
             sidebar_layout.addWidget(btn)
 
         sidebar_layout.addStretch()
-        version = QLabel("v2.0.0")
+        version = QLabel("v2.1.0")
         version.setObjectName("subtitle")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(version)

@@ -1,77 +1,68 @@
 # Changelog
 
-## v2.0 — Current (2026-06-15)
+## v2.1.0 — Path Centralization & Robustness (2026-06-16)
 
-### Major changes since v1.x
+### Breaking changes (source only)
+- All hardcoded path strings (`"models"`, `"hub"`, `"funasr_cache"`, `"Qwen"`,
+  etc.) have been replaced with shared helpers from `utils.py`.
+- `utils.py` now exports: `model_subdirs()`, `model_safe_name()`,
+  `resolve_model_path()`, `get_temp_cache_dir()`.
 
-- **CosyVoice 3.0-0.5B replaces 300M/SFT/Instruct**: Single model (~1.1 GB) 
-  replaces three old models (~18 GB total). Supports 9 languages + 18 Chinese 
-  dialects, zero-shot voice cloning, emotion/dialect control.
-- **Voice cloning (人声复刻)**: `synthesize_with_prompt()` in `tts_engine.py`. 
-  Reference audio + prompt text → cloned voice output.
-- **Thread-safety fix**: Model download progress now uses `pyqtSignal` instead 
-  of calling Qt widgets from worker threads (PyQt6 violation).
-- **Disk cleanup**: `ModelManager.deep_cleanup()` removes temp caches, stale 
-  download directories, and duplicate model copies.
-- **Config caching**: `utils.load_config()` caches with TTL to avoid repeated
-  disk I/O.
-- **Buffer overflow protection**: WASAPI loopback buffer capped at 60 seconds;
-  overflow triggers discard.
-- **Batch model download**: "下载选中" now queues all checked models instead of 
-  only downloading the first one.
-- **Resource cleanup**: Temp audio files cleaned on new TTS generation. 
-  Subtitle overlay and recorder stopped on app close.
-- **Model scanning robustness**: `PermissionError` and missing directories 
-  handled during model scan and disk usage calculation.
-- **Config save error handling**: `subtitle_overlay.py` `save_config` calls all 
-  wrapped in try/except.
-- **Unused imports removed**: `json`, `queue`, `Path`, `QCursor`, `QIcon`, 
-  `QSlider`, `QObject` from `launcher.py`; `queue` from `main.py`.
-- **Documentation**: README.md, DEPLOY.md, MODEL_GUIDE.md rewritten. Added 
-  LICENSE (MIT) and NOTICE.md (third-party licenses and disclaimers).
+### Fixes
+- ModelScope encoding fix: models downloaded with `___` in directory names
+  (e.g. `Fun-CosyVoice3-0___5B-2512`) are now correctly recognized via fuzzy
+  directory scanning.
+- CosyVoice 3.0 model loading now attempts the `cosyvoice` Python package API
+  instead of `funasr.AutoModel`.
+- Config cache (`_config_cache`) protected by `threading.Lock()`.
+- Model manager `_local_models` protected by `_models_lock`.
+- Batch download: checking multiple models and clicking "下载选中" now
+  downloads all of them sequentially instead of only the first.
+- Temp audio files cleaned up on re-generation and on app close.
+- `save_config()` no longer crashes on disk-full or permission errors.
+- `subtitle_overlay` save operations all guarded with try/except.
+- `QApplication.primaryScreen()` nullable guard for headless/startup edge cases.
+- `event.globalPosition()` backward-compatible with `event.globalPos()`.
+- `transcribe_stream` exception adds CUDA OOM detection and log instead of
+  silent pass.
+- `_init_model_impl` weight detection now scans for all formats (`.pt`,
+  `.bin`, `.safetensors`, `.onnx`) instead of only `.pt`.
+- Unused imports removed across all files.
 
-### Fixes since v1.x
+---
 
-- Long audio (>60 s) no longer falls through to full-file path when chunking 
-  produces empty results.
-- Duration parsing handles `HH:MM:SS.mmm` format.
-- Removed `callback_queue` dead code (was never read, grew unbounded).
-- `_sounddevice_start` returns success/failure; `start()` checks before 
-  spawning processing thread.
-- `pyttsx3` engine locked with `self._lock` in `WindowsTTS.synthesize`.
-- `QApplication.primaryScreen()` nullable guard in `subtitle_overlay`.
-- `event.globalPosition()` deprecation workaround for older PyQt6.
-- `tempfile.mktemp()` replaced with `NamedTemporaryFile`.
+## v2.0 — CosyVoice 3.0 Release (2026-06-15)
+
+### Major
+- **CosyVoice 3.0-0.5B** replaces three 300M/SFT/Instruct models.
+- **Voice cloning** with `synthesize_with_prompt()`.
+- Thread safety for download progress via `pyqtSignal`.
+- `ModelManager.deep_cleanup()` for disk space recovery.
+- Config caching with TTL to reduce disk I/O.
+- WASAPI buffer overflow protection (capped at 60 s).
+
+### Docs
+- README.md / DEPLOY.md / MODEL_GUIDE.md rewritten.
+- LICENSE (MIT) and NOTICE.md added.
 
 ---
 
 ## v1.x — Initial Development (2026-05-21 ~ 2026-06-06)
 
-### v1.3 — TTS (2026-06-06)
+### v1.3 — TTS
+- `tts_engine.py` with WindowsTTS (SAPI5) and ModelTTS.
+- TTS page in GUI.
 
-- Added `tts_engine.py` with WindowsTTS (SAPI5) and ModelTTS (CosyVoice).
-- Added TTS page in GUI with engine/voice selection and playback controls.
-- Replaced `edge-tts` with `pyttsx3` in `requirements.txt`.
-
-### v1.2 — Deployment (2026-06-04)
-
-- Batch file encoding fix (CRLF + GBK instead of UTF-8).
-- Model card checkbox auto-select for installed models.
+### v1.2 — Deployment
+- Batch file encoding fix (CRLF + GBK).
+- Model card checkbox auto-select.
 - First packaging test on clean Windows machine.
-- Hard-coded paths removed from `config.json`.
-- DEPLOY.md and CHANGELOG.md created.
 
-### v1.1 — Core Features (2026-05-31)
+### v1.1 — Core Features
+- Engine singleton, model switching, chunked file transcription.
+- Real-time recording (sounddevice + WASAPI loopback).
+- Translation, floating subtitle overlay, model manager.
 
-- Engine singleton, model switching, file transcription with chunking.
-- Real-time recording via sounddevice and WASAPI loopback.
-- Translation (builtin / local).
-- Floating subtitle overlay with 5 display modes.
-- Model manager with download/delete/scan.
-- Chinese path compatibility via temp cache.
-
-### v1.0 — Initial (2026-05-21)
-
+### v1.0 — Initial
 - Project scaffold, ffmpeg bundling, venv setup.
 - Fun-ASR-Nano-2512 registration fix.
-- Qwen3-0.6B download and Chinese path workaround.
