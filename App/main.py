@@ -1,14 +1,15 @@
 import os
 import sys
 import re
-import json
 import threading
 import time
 import ctypes
 import traceback
 import numpy as np
 import sounddevice as sd
-from utils import load_config, get_default_model_dir
+from utils import (load_config, get_default_model_dir,
+                   get_temp_cache_dir, model_subdirs, model_safe_name)
+
 
 def _ensure_ffmpeg():
     app_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,8 +21,10 @@ def _ensure_ffmpeg():
 
 _ensure_ffmpeg()
 
+
 def _read_fresh_config():
     return load_config(force_reload=True)
+
 
 class TranscriptionEngine:
     _instance = None
@@ -61,6 +64,7 @@ class TranscriptionEngine:
         import torch
         import shutil
         import tempfile
+        from utils import model_subdirs, model_safe_name, get_temp_cache_dir
 
         fresh = _read_fresh_config()
         model_name = model_name or fresh.get("model_name", "iic/SenseVoiceSmall")
@@ -75,12 +79,19 @@ class TranscriptionEngine:
         model_dir = fresh.get("model_dir", get_default_model_dir())
         print(f"[Engine] 初始化模型: {model_name}, 设备: {device}")
 
-        local_model_path = os.path.join(model_dir, "models", model_name.replace("/", os.sep))
+        safe_name = model_safe_name(model_name)
+        local_model_path = None
+        for sub in model_subdirs(model_dir):
+            p = os.path.join(sub, safe_name)
+            if os.path.isdir(p):
+                local_model_path = p
+                break
+
         has_non_ascii = any(ord(c) > 127 for c in model_dir)
 
-        if has_non_ascii and os.path.isdir(local_model_path):
-            temp_cache = os.path.join(tempfile.gettempdir(), "funasr_cache")
-            temp_model_dir = os.path.join(temp_cache, "models", model_name.replace("/", os.sep))
+        if has_non_ascii and local_model_path:
+            temp_cache = get_temp_cache_dir()
+            temp_model_dir = os.path.join(temp_cache, safe_name)
             if not os.path.exists(os.path.join(temp_model_dir, "model.pt")):
                 print("检测到中文路径，复制模型到临时目录...")
                 if os.path.exists(temp_model_dir):
@@ -88,12 +99,6 @@ class TranscriptionEngine:
                 os.makedirs(os.path.dirname(temp_model_dir), exist_ok=True)
                 shutil.copytree(local_model_path, temp_model_dir)
             os.environ['MODELSCOPE_CACHE'] = temp_cache
-            if is_audio_llm:
-                qwen_src = os.path.join(model_dir, "models", "Qwen", "Qwen3-0___6B", "model.safetensors")
-                qwen_dst = os.path.join(temp_model_dir, "Qwen3-0.6B", "model.safetensors")
-                if os.path.exists(qwen_src) and not os.path.exists(qwen_dst):
-                    os.makedirs(os.path.dirname(qwen_dst), exist_ok=True)
-                    shutil.copy2(qwen_src, qwen_dst)
         else:
             os.environ['MODELSCOPE_CACHE'] = model_dir
 
@@ -111,7 +116,7 @@ class TranscriptionEngine:
                 from funasr.models.fun_asr_nano import model as _nano_model
                 from funasr.models.fun_asr_nano import ctc as _nano_ctc
             except ImportError:
-                pass
+                print("[Engine] FunASRNano 模块导入失败，可能影响模型加载")
 
         model_kwargs = {
             "model": model_name,
@@ -158,37 +163,36 @@ class TranscriptionEngine:
             batch_size = fresh.get("batch_size", 1)
 
             import subprocess, tempfile
+            total_duration = 0
             try:
                 probe = subprocess.run(
                     ["ffmpeg", "-i", audio_path],
                     capture_output=True, timeout=10
                 )
-            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-                print(f"[Engine] ffprobe 失败: {e}，使用原始路径识别")
-                total_duration = 0
-            else:
-                total_duration = 0
                 stderr_text = probe.stderr.decode("utf-8", errors="replace") if probe.stderr else ""
                 for line in stderr_text.split("\n"):
                     if "Duration:" in line:
                         parts = line.split("Duration:")[1].split(",")[0].strip()
-                        h, m, s = parts.split(":")[0], parts.split(":")[1], "0"
-                        try:
-                            s = parts.split(":")[2]
-                        except IndexError:
-                            s = "0"
-                        try:
-                            total_duration = float(h) * 3600 + float(m) * 60 + float(s)
-                        except ValueError:
-                            total_duration = 0
+                        parts_list = parts.split(":")
+                        if len(parts_list) >= 3:
+                            try:
+                                total_duration = (float(parts_list[0]) * 3600 +
+                                                  float(parts_list[1]) * 60 +
+                                                  float(parts_list[2].split(".")[0]))
+                            except ValueError:
+                                total_duration = 0
                         break
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                print(f"[Engine] ffprobe 失败: {e}，使用原始路径识别")
+
             print(f"[Engine] 音频时长: {total_duration:.1f}s")
 
             if total_duration > 60:
                 wav_tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
                 try:
                     subprocess.run(
-                        ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_tmp],
+                        ["ffmpeg", "-y", "-i", audio_path, "-ar", "16000",
+                         "-ac", "1", "-f", "wav", wav_tmp],
                         capture_output=True, timeout=120
                     )
                     import soundfile as sf
@@ -208,7 +212,9 @@ class TranscriptionEngine:
                         chunk_tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
                         try:
                             sf.write(chunk_tmp, chunk, sr)
-                            res = self.model.generate(input=chunk_tmp, force_yes=True, batch_size=batch_size, language=lang, use_itn=use_itn)
+                            res = self.model.generate(
+                                input=chunk_tmp, force_yes=True,
+                                batch_size=batch_size, language=lang, use_itn=use_itn)
                             if res:
                                 for r in res:
                                     if isinstance(r, dict) and "text" in r and r["text"].strip():
@@ -256,21 +262,20 @@ class TranscriptionEngine:
         if fresh.get("target_language") == "zh" and source_lang not in ("zh", "zh-CN", "zh-TW", "auto"):
             mode = fresh.get("translation_mode", "builtin")
             if mode == "builtin" and self.model:
-                res = []
                 try:
                     if hasattr(self.model, 'generate'):
                         res = self.model.generate(input=text, language="zh", use_itn=False, batch_size=1)
-                    if res and len(res) > 0:
-                        translated_texts = []
-                        for r in res:
-                            if isinstance(r, dict) and "text" in r:
-                                translated_texts.append(r["text"])
-                            elif isinstance(r, str):
-                                translated_texts.append(r)
-                        if translated_texts:
-                            translated = " ".join(translated_texts)
-                            if translated and translated != text:
-                                return translated
+                        if res and len(res) > 0:
+                            translated_texts = []
+                            for r in res:
+                                if isinstance(r, dict) and "text" in r:
+                                    translated_texts.append(r["text"])
+                                elif isinstance(r, str):
+                                    translated_texts.append(r)
+                            if translated_texts:
+                                translated = " ".join(translated_texts)
+                                if translated and translated != text:
+                                    return translated
                 except Exception as e:
                     print(f"[Translate] 内置翻译失败: {e}")
             elif mode == "local" and self.translation_model:
@@ -306,6 +311,10 @@ class TranscriptionEngine:
                     return self._translate_if_needed(combined, lang)
             return ""
         except Exception as e:
+            if "CUDA out of memory" in str(e) or "OOM" in str(e):
+                print(f"[Stream] CUDA内存不足: {e}")
+            elif "KeyboardInterrupt" not in str(type(e).__name__):
+                print(f"[Stream] 转写异常: {e}")
             return ""
 
 
@@ -404,7 +413,8 @@ class RealtimeRecorder:
             self._wasapi_samplerate = wf.nSamplesPerSec
             self._wasapi_channels = wf.nChannels
             REFERENCE_TIME = 10000000
-            hr = audio_client.Initialize(0, AUDCLNT_STREAMFLAGS_LOOPBACK, 100 * REFERENCE_TIME // 1000, 0, wf_ptr, POINTER(GUID)())
+            hr = audio_client.Initialize(0, AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                         100 * REFERENCE_TIME // 1000, 0, wf_ptr, POINTER(GUID)())
             if hr != 0:
                 print(f"WASAPI loopback 初始化失败: 0x{hr & 0xFFFFFFFF:08x}")
                 return False
@@ -439,7 +449,8 @@ class RealtimeRecorder:
                         audio = np.mean(audio, axis=1)
                     if self._wasapi_samplerate != self.sample_rate:
                         nsamples = int(len(audio) * self.sample_rate / self._wasapi_samplerate)
-                        audio = scipy.signal.resample(audio, nsamples).astype(np.float32)
+                        if nsamples > 0:
+                            audio = scipy.signal.resample(audio, nsamples).astype(np.float32)
                     with self._buffer_lock:
                         max_samples = max_buffer_seconds * self.sample_rate
                         buffer_len = len(self.audio_buffer)
@@ -533,6 +544,7 @@ def transcribe_file_wrapper(audio_path, config=None, engine=None):
     if not eng.model:
         eng.init_model()
     return eng.transcribe_file(audio_path)
+
 
 if __name__ == "__main__":
     config = load_config()

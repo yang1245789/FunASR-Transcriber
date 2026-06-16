@@ -2,11 +2,9 @@ import os
 import json
 import threading
 import shutil
-import tempfile
 import re
-import importlib
-from pathlib import Path
-from utils import get_config_path, get_default_model_dir
+from utils import (get_config_path, get_default_model_dir, get_temp_cache_dir,
+                   model_subdirs)
 
 DEFAULT_CONFIG_PATH = get_config_path()
 
@@ -157,7 +155,7 @@ AVAILABLE_MODELS = {
     },
     "FunAudioLLM/Fun-CosyVoice3-0.5B-2512": {
         "name": "CosyVoice 3.0-0.5B (语音合成)",
-        "description": "阿里通义 CosyVoice 3.0 多语言语音合成模型(0.5B)，支持9种语言+18种中文方言，零样本语音克隆/情感/方言控制。需同时下载 ttsfrd 资源包。",
+        "description": "阿里通义 CosyVoice 3.0 多语言语音合成模型(0.5B)，支持9种语言+18种中文方言，零样本语音克隆/情感/方言控制。",
         "size": "~1.1GB",
         "type": "tts",
         "source": "modelscope",
@@ -169,7 +167,7 @@ AVAILABLE_MODELS = {
     },
     "iic/CosyVoice-ttsfrd": {
         "name": "CosyVoice-ttsfrd (文本正则化资源)",
-        "description": "CosyVoice 文本前端处理资源包，提升数字/日期/金额等文本规整质量。CosyVoice 3.0 的可选增强资源。",
+        "description": "CosyVoice 文本前端处理资源包，提升数字/日期/金额等文本规整质量。",
         "size": "~50MB",
         "type": "tts",
         "source": "modelscope",
@@ -181,6 +179,7 @@ AVAILABLE_MODELS = {
     },
 }
 
+
 class ModelManager:
     def __init__(self, config_path=None):
         self.config_path = config_path or DEFAULT_CONFIG_PATH
@@ -188,26 +187,24 @@ class ModelManager:
         self.model_dir = self.config.get("model_dir") or get_default_model_dir()
         os.environ['MODELSCOPE_CACHE'] = self.model_dir
         self._download_threads = {}
+        self._models_lock = threading.Lock()
         self._local_models = {}
         self._disk_usage_cache = -1
         self._scan_local_models()
 
-    def _get_modelscope_paths(self, model_id):
-        model_folder = model_id.replace("/", os.sep)
-        return [
-            os.path.join(self.model_dir, "hub", model_folder),
-            os.path.join(self.model_dir, "models", model_folder),
-            os.path.join(self.model_dir, model_folder),
-        ]
+    def _model_dir_paths(self, model_name_rel):
+        return [os.path.join(d, model_name_rel) for d in
+                model_subdirs(self.model_dir)] + [os.path.join(self.model_dir, model_name_rel)]
 
     def _find_model_dir(self, model_id):
-        for path in self._get_modelscope_paths(model_id):
+        model_name_rel = model_id.replace("/", os.sep)
+        for path in self._model_dir_paths(model_name_rel):
             if self._is_valid_model_dir(path):
                 return path
         if "/" in model_id:
             org_name, model_name = model_id.split("/", 1)
             model_norm = re.sub(r'[^a-z0-9]', '', model_name.lower())
-            for prefix in [os.path.join(self.model_dir, "hub"), os.path.join(self.model_dir, "models"), self.model_dir]:
+            for prefix in model_subdirs(self.model_dir):
                 org_dir = os.path.join(prefix, org_name)
                 if not os.path.isdir(org_dir):
                     continue
@@ -226,22 +223,27 @@ class ModelManager:
     def _is_valid_model_dir(self, path):
         if not os.path.isdir(path):
             return False
-        has_config = os.path.exists(os.path.join(path, "configuration.json")) or os.path.exists(os.path.join(path, "config.json"))
+        has_config = (os.path.exists(os.path.join(path, "configuration.json"))
+                      or os.path.exists(os.path.join(path, "config.json")))
         try:
             names = os.listdir(path)
         except PermissionError:
             return False
-        has_model = any(f.endswith(('.pt', '.bin', '.safetensors', '.onnx')) for f in names if os.path.isfile(os.path.join(path, f)))
+        has_model = any(f.endswith(('.pt', '.bin', '.safetensors', '.onnx'))
+                        for f in names if os.path.isfile(os.path.join(path, f)))
         return has_config or has_model
 
     def _scan_local_models(self):
-        for known_id in AVAILABLE_MODELS:
-            path = self._find_model_dir(known_id)
-            if path:
-                self._local_models[known_id] = path
+        with self._models_lock:
+            self._local_models.clear()
+            for known_id in AVAILABLE_MODELS:
+                path = self._find_model_dir(known_id)
+                if path:
+                    self._local_models[known_id] = path
 
     def get_local_models(self):
-        return self._local_models
+        with self._models_lock:
+            return dict(self._local_models)
 
     def _load_config(self):
         if os.path.exists(self.config_path):
@@ -253,15 +255,17 @@ class ModelManager:
         return {}
 
     def _save_config(self):
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump(self.config, f, indent=4, ensure_ascii=False)
+        try:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"[ModelManager] 保存配置失败: {e}")
 
     def set_model_dir(self, path):
         self.model_dir = path
         self.config["model_dir"] = path
         self._save_config()
         os.environ['MODELSCOPE_CACHE'] = path
-        self._local_models.clear()
         self._scan_local_models()
 
     def get_model_dir(self):
@@ -271,11 +275,13 @@ class ModelManager:
         return AVAILABLE_MODELS
 
     def is_model_downloaded(self, model_id):
-        if model_id in self._local_models:
-            return True
+        with self._models_lock:
+            if model_id in self._local_models:
+                return True
         path = self._find_model_dir(model_id)
         if path:
-            self._local_models[model_id] = path
+            with self._models_lock:
+                self._local_models[model_id] = path
             return True
         return False
 
@@ -316,8 +322,8 @@ class ModelManager:
                 snapshot_download(model_id)
                 if progress_callback:
                     progress_callback(model_id, 100, "下载完成")
-                self._local_models.clear()
-                self._disk_usage_cache = -1
+                with self._models_lock:
+                    self._disk_usage_cache = -1
                 self._scan_local_models()
                 if complete_callback:
                     complete_callback(model_id, "success")
@@ -333,54 +339,53 @@ class ModelManager:
 
     def delete_model(self, model_id):
         deleted = False
-        for path in self._get_modelscope_paths(model_id):
+        model_name_rel = model_id.replace("/", os.sep)
+        for path in self._model_dir_paths(model_name_rel):
             if os.path.exists(path):
                 shutil.rmtree(path)
                 deleted = True
-        if model_id in self._local_models:
-            del self._local_models[model_id]
-        self._disk_usage_cache = -1
+        with self._models_lock:
+            if model_id in self._local_models:
+                del self._local_models[model_id]
+            self._disk_usage_cache = -1
         return deleted
 
     def deep_cleanup(self):
         freed = 0
-        temp_dir = os.path.join(tempfile.gettempdir(), "funasr_cache")
+        temp_dir = get_temp_cache_dir()
         if os.path.exists(temp_dir):
             try:
-                total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(temp_dir) for f in fs)
+                total = sum(os.path.getsize(os.path.join(dp, f))
+                            for dp, _, fs in os.walk(temp_dir) for f in fs)
                 shutil.rmtree(temp_dir)
                 freed += total
             except Exception:
                 pass
-        for root, dirs, _ in os.walk(self.model_dir):
-            for d in dirs:
-                if d.startswith(".") and ("temp" in d or "_temp" in d):
-                    path = os.path.join(root, d)
-                    try:
-                        total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(path) for f in fs)
-                        shutil.rmtree(path)
-                        freed += total
-                    except Exception:
-                        pass
-        qwen_dup = os.path.join(self.model_dir, "Qwen")
-        if os.path.exists(qwen_dup):
-            try:
-                total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(qwen_dup) for f in fs)
-                shutil.rmtree(qwen_dup)
-                freed += total
-            except Exception:
-                pass
-        self._local_models.clear()
-        self._disk_usage_cache = -1
+        if os.path.isdir(self.model_dir):
+            for root, dirs, _ in os.walk(self.model_dir):
+                for d in dirs:
+                    if d.startswith(".") and ("temp" in d or "_temp" in d):
+                        path = os.path.join(root, d)
+                        try:
+                            total = sum(os.path.getsize(os.path.join(dp, f))
+                                        for dp, _, fs in os.walk(path) for f in fs)
+                            shutil.rmtree(path)
+                            freed += total
+                        except Exception:
+                            pass
+        with self._models_lock:
+            self._disk_usage_cache = -1
         self._scan_local_models()
         return freed
 
     def get_disk_usage(self, force_recalc=False):
-        if not force_recalc and self._disk_usage_cache >= 0:
-            return self._disk_usage_cache
+        with self._models_lock:
+            if not force_recalc and self._disk_usage_cache >= 0:
+                return self._disk_usage_cache
         total = 0
         if not os.path.isdir(self.model_dir):
-            self._disk_usage_cache = total
+            with self._models_lock:
+                self._disk_usage_cache = total
             return total
         for item in os.listdir(self.model_dir):
             item_path = os.path.join(self.model_dir, item)
@@ -394,7 +399,8 @@ class ModelManager:
                             total += os.path.getsize(fp)
                     except OSError:
                         pass
-        self._disk_usage_cache = total
+        with self._models_lock:
+            self._disk_usage_cache = total
         return total
 
     @staticmethod

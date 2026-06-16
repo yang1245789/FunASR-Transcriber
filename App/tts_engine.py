@@ -2,10 +2,8 @@ import os
 import threading
 import tempfile
 from typing import Optional, List, Tuple
-from utils import load_config, get_default_model_dir
-
-FUNASR_CACHE_NAME = "funasr_cache"
-MODEL_CACHE_SUBDIRS = ["models", "hub"]
+from utils import (load_config, get_default_model_dir, get_temp_cache_dir,
+                   model_subdirs, resolve_model_path, FUNASR_CACHE_NAME)
 
 WINDOWS_VOICES_FALLBACK: List[Tuple[str, str]] = [
     ("", "系统默认语音"),
@@ -62,8 +60,7 @@ class WindowsTTS:
             import pyttsx3
             engine = pyttsx3.init()
             for v in engine.getProperty("voices"):
-                exists = any(v.id == item[0] for item in voices)
-                if not exists:
+                if not any(v.id == item[0] for item in voices):
                     name = v.name or v.id.split("\\")[-1]
                     voices.append((v.id, name))
             engine.stop()
@@ -115,38 +112,27 @@ class WindowsTTS:
             return TTSResult(success=False, error=str(e))
 
 
-def _resolve_model_path(model_name: str, model_dir: str) -> Optional[str]:
-    for subdir in MODEL_CACHE_SUBDIRS:
-        path = os.path.join(model_dir, subdir, model_name.replace("/", os.sep))
-        if os.path.exists(path):
-            return path
-    return None
-
-
-def _ensure_ascii_cache(model_dir: str, model_name: str) -> Optional[str]:
+def _ensure_ascii_cache(model_dir: str, model_name: str) -> str:
     has_non_ascii = any(ord(c) > 127 for c in model_dir)
     if not has_non_ascii:
         return model_dir
-    local_path = _resolve_model_path(model_name, model_dir)
+    local_path = resolve_model_path(model_name, model_dir)
     if not local_path:
         return model_dir
     import shutil
     import subprocess as _sp
-    temp_cache = os.path.join(tempfile.gettempdir(), FUNASR_CACHE_NAME)
-    target = os.path.join(temp_cache, "models", model_name.replace("/", os.sep))
+    temp_cache = get_temp_cache_dir()
+    target = os.path.join(temp_cache, model_name.replace("/", os.sep))
     marker = os.path.join(target, ".copied")
     if not os.path.exists(marker):
         if os.path.exists(target):
             shutil.rmtree(target)
         os.makedirs(os.path.dirname(target), exist_ok=True)
         try:
-            _sp.run(['cmd', '/c', 'mklink', '/J', target, local_path], check=True, capture_output=True)
+            _sp.run(['cmd', '/c', 'mklink', '/J', target, local_path],
+                    check=True, capture_output=True)
         except Exception:
-            def _ignore_submodels(d, contents):
-                return [c for c in contents if os.path.isdir(os.path.join(d, c)) and
-                        any(f.endswith(('.pt', '.bin', '.safetensors'))
-                            for r, _, fs in os.walk(os.path.join(d, c)) for f in fs)]
-            shutil.copytree(local_path, target, ignore=_ignore_submodels)
+            shutil.copytree(local_path, target)
         try:
             with open(marker, "w") as f:
                 f.write("1")
@@ -160,6 +146,7 @@ class ModelTTS:
         self.model = None
         self._last_model_name: Optional[str] = None
         self._last_device: Optional[str] = None
+        self._load_lock = threading.Lock()
 
     @staticmethod
     def is_available() -> bool:
@@ -170,6 +157,14 @@ class ModelTTS:
         return MODEL_TTS_INFO
 
     def load_model(
+        self,
+        model_name: str = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+        device: Optional[str] = None,
+    ) -> bool:
+        with self._load_lock:
+            return self._load_model_impl(model_name, device)
+
+    def _load_model_impl(
         self,
         model_name: str = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
         device: Optional[str] = None,
@@ -188,25 +183,23 @@ class ModelTTS:
             if cache_dir != model_dir:
                 os.environ["MODELSCOPE_CACHE"] = cache_dir
 
-            local_path = _resolve_model_path(model_name, model_dir)
+            local_path = resolve_model_path(model_name, model_dir)
 
             if "CosyVoice3" in model_name or "CosyVoice" in model_name:
                 try:
-                    from cosyvoice.cli.cosyvoice import CosyVoice3 as _CosyVoice3
-                    self.model = _CosyVoice3(
+                    from cosyvoice.cli.cosyvoice import CosyVoice3 as _CV3
+                    self.model = _CV3(
                         local_path or model_name,
-                        fp16=True if device.startswith("cuda") else False,
+                        fp16=device.startswith("cuda"),
                     )
                 except ImportError:
                     try:
-                        from cosyvoice.cli.cosyvoice import AutoModel as _CosyAutoModel
-                        self.model = _CosyAutoModel(
-                            local_path or model_name,
-                        )
+                        from cosyvoice.cli.cosyvoice import AutoModel as _CosyAM
+                        self.model = _CosyAM(local_path or model_name)
                     except ImportError:
-                        print("[ModelTTS] cosyvoice package not installed.")
-                        print("[ModelTTS] Install: pip install cosyvoice")
-                        print("[ModelTTS] Or: git clone https://github.com/FunAudioLLM/CosyVoice && cd CosyVoice && pip install -e .")
+                        print("[ModelTTS] cosyvoice 未安装，无法加载 CosyVoice 模型")
+                        print("[ModelTTS] 安装: git clone https://github.com/FunAudioLLM/CosyVoice")
+                        print("[ModelTTS]        cd CosyVoice && pip install -e .")
                         return False
             else:
                 from funasr import AutoModel
@@ -274,6 +267,8 @@ class ModelTTS:
     ) -> TTSResult:
         if not text or not text.strip():
             return TTSResult(success=False, error="文本为空")
+        if len(text) > 5000:
+            return TTSResult(success=False, error="文本过长（最多 5000 字符）")
         if not prompt_audio_path or not os.path.exists(prompt_audio_path):
             return TTSResult(success=False, error="参考音频文件不存在")
         try:
@@ -287,7 +282,8 @@ class ModelTTS:
             if prompt_sr != 16000:
                 import scipy.signal
                 target_len = int(len(prompt_audio) * 16000 / prompt_sr)
-                prompt_audio = scipy.signal.resample(prompt_audio, target_len)
+                if target_len > 0:
+                    prompt_audio = scipy.signal.resample(prompt_audio, target_len)
                 prompt_sr = 16000
             if len(prompt_audio.shape) > 1:
                 prompt_audio = np.mean(prompt_audio, axis=1)
@@ -302,12 +298,12 @@ class ModelTTS:
 
             result = self.model.generate(**gen_kw)
             if result and len(result) > 0:
-                import soundfile as sf_write
                 if isinstance(result[0], dict):
                     entry = result[0]
                     audio = entry.get("audio") or entry.get("wav") or entry.get("array")
                     sr = entry.get("sample_rate") or entry.get("sampling_rate") or 24000
                     if audio is not None:
+                        import soundfile as sf_write
                         sf_write.write(output_path, audio, sr)
                         duration = len(audio) / sr
                         return TTSResult(audio_path=output_path, duration=duration, success=True)
