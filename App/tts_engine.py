@@ -3,7 +3,7 @@ import threading
 import tempfile
 from typing import Optional, List, Tuple
 from utils import (load_config, get_default_model_dir, get_temp_cache_dir,
-                   model_subdirs, resolve_model_path, FUNASR_CACHE_NAME)
+                   model_subdirs, resolve_model_path)
 
 WINDOWS_VOICES_FALLBACK: List[Tuple[str, str]] = [
     ("", "系统默认语音"),
@@ -132,7 +132,9 @@ def _ensure_ascii_cache(model_dir: str, model_name: str) -> str:
             _sp.run(['cmd', '/c', 'mklink', '/J', target, local_path],
                     check=True, capture_output=True)
         except Exception:
+            print(f"[TTS] 目录联接失败（需管理员权限），复制模型 {os.path.basename(local_path)} 到临时目录...")
             shutil.copytree(local_path, target)
+            print("[TTS] 模型复制完成")
         try:
             with open(marker, "w") as f:
                 f.write("1")

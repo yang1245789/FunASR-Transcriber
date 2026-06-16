@@ -92,7 +92,13 @@ class TranscriptionEngine:
         if has_non_ascii and local_model_path:
             temp_cache = get_temp_cache_dir()
             temp_model_dir = os.path.join(temp_cache, safe_name)
-            if not os.path.exists(os.path.join(temp_model_dir, "model.pt")):
+            has_weights = (
+                os.path.isdir(temp_model_dir) and
+                any(f.endswith(('.pt', '.bin', '.safetensors', '.onnx'))
+                    for f in os.listdir(temp_model_dir)
+                    if os.path.isfile(os.path.join(temp_model_dir, f)))
+            )
+            if not has_weights:
                 print("检测到中文路径，复制模型到临时目录...")
                 if os.path.exists(temp_model_dir):
                     shutil.rmtree(temp_model_dir)
